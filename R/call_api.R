@@ -47,6 +47,7 @@ cleanData <- function(df){
 writeData <- function(df,out_dir='.'){
   # df <- iris
   fn <- file.path(out_dir,paste0(Sys.Date(),'.csv'))
+  new_file <- ifelse(file.exists(fn),F,T)
   write.table(df,fn,append = new_file,col.names = F,row.names = F)
 }
 
