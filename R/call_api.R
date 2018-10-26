@@ -1,8 +1,11 @@
 
 
-filename <- function(ext,level){
+filename <- function(ext,level='min'){
   now <- lubridate::now(tzone = "UTC")
-  paste0(as.Date(now),'-',lubridate::hour(now),'-',lubridate::minute(now),ext)
+  switch(level,
+         day=paste0(as.Date(now),ext),
+         hour=paste0(as.Date(now),'-',lubridate::hour(now),ext),
+         min=paste0(as.Date(now),'-',lubridate::hour(now),'-',lubridate::minute(now),ext))
 }
 
 #' bucketKeys
@@ -55,6 +58,21 @@ sendToS3 <- function(obj,bucket,tryN = 5){
   put
 }
 
+startLogging <- function(projDir,name){
+  # log_file <- 'example.log'
+  # logger.options()
+  require(futile.logger)
+  if(!dir.exists(file.path(projDir,'logs'))) dir.create('logs')
+  lf <- file.path(projDir,'logs',paste0(name,'-',filename('.log','day')))
+  flog.appender(appender.tee(lf))
+}
+
+setEnv <- function(keys){
+  Sys.setenv("AWS_ACCESS_KEY_ID" = keys$AWS_ACCESS_KEY_ID,
+             "AWS_SECRET_ACCESS_KEY" = keys$AWS_SECRET_ACCESS_KEY,
+             "AWS_DEFAULT_REGION" = keys$AWS_DEFAULT_REGION)
+
+}
 
 #' aisToS3
 #'
@@ -64,18 +82,36 @@ sendToS3 <- function(obj,bucket,tryN = 5){
 #' @export
 #'
 #' @examples
-aisToS3 <- function(keys){
+aisToS3 <- function(projDir){
+  require(projectNickel)
+  require(aws.s3)
 
-  Sys.setenv("AWS_ACCESS_KEY_ID" = keys$AWS_ACCESS_KEY_ID,
-             "AWS_SECRET_ACCESS_KEY" = keys$AWS_SECRET_ACCESS_KEY,
-             "AWS_DEFAULT_REGION" = keys$AWS_DEFAULT_REGION)
+  startLogging(projDir,'aisToS3')
 
+  flog.info('Starting AIShub API call')
+  keys <- readRDS(file.path(projDir,'keys.Rdata'))
 
-  fn <- filename('.bz2')
+  setEnv(keys)
+
+  fn <- filename('.bz2','min')
   download.file(keys$AISHUB_URL,destfile = fn)
+  # TODO try multiple times
   on.exit(file.remove(fn))
 
-  sendToS3(fn,'ais-current',5)
+  fs <- round(file.info(fn)$size/1e3/1e3,1)
+  if(fs<0.5){
+    flog.warn(paste('Created file of size',fs,'MB'))
+  } else {
+    flog.info(paste('Created file of size',fs,'MB'))
+  }
+
+  put <- sendToS3(fn,'ais-current',5)
+
+  if(is.err(put)){
+    flog.error('Failed to upload to s3')
+  } else {
+    flog.info(paste('Successfully uploaded', fn, 'to ais-current'))
+  }
 
 }
 
@@ -87,40 +123,79 @@ aisToS3 <- function(keys){
 #' @export
 #'
 #' @examples
-aggregateAIS <- function(keys){
+aggregateAIS <- function(projDir){
+  require(projectNickel)
+  require(dplyr)
+  require(aws.s3)
 
-  Sys.setenv("AWS_ACCESS_KEY_ID" = keys$AWS_ACCESS_KEY_ID,
-             "AWS_SECRET_ACCESS_KEY" = keys$AWS_SECRET_ACCESS_KEY,
-             "AWS_DEFAULT_REGION" = keys$AWS_DEFAULT_REGION)
+  startLogging(projDir,'aggregateAIS')
+
+  keys <- readRDS(file.path(projDir,'keys.Rdata'))
+
+  setEnv(keys)
 
   kl <- bucketKeys('ais-current','.bz2')
 
-  if(is.err(kl) || !nrow(kl)) return()
+  if(is.err(kl) || !nrow(kl)){
+    flog.error('Failed to retrieve any keys from ais-current')
+    return()
+  }
 
   # only get keys from last 61mins
   cutoff <- lubridate::now(tzone = "UTC") - (61*60)
   kl <- kl[kl$time > cutoff,]
 
-  if(!nrow(kl)) return()
+  if(!nrow(kl)){
+    flog.warn('No keys were found from the last hour ais-current')
+    return()
+  }
 
   kl <- kl$name
+  flog.info(paste('Aggregating',length(kl), 'files'))
 
-  tl <- lapply(kl,function(k) try(s3read_using(readr::read_csv,object=k,bucket='ais-current'),silent = T))
+  tl <- lapply(kl,function(k) try({
 
+    suppressMessages(s3read_using(readr::read_csv,object=k,bucket='ais-current'))
+
+    },silent = T))
+
+  is.valid <- function(t){
+    if(is.err(t) ) return(F)
+    if(ncol(t)!=19) return(F)
+    if(!nrow(t)) return(F)
+    T
+  }
   # filter out errors and (remove from kl)
-  errors <- unlist(lapply(tl, is.err))
-  kl <- kl[!errors]
-  tl <- tl[!errors]
+  valid <- unlist(lapply(tl, is.valid))
+  if(any(!valid)){
+    flog.warn(paste(sum(!valid),'out of',length(kl), 'files were not valid'))
+  }
+  kl <- kl[valid]
+  tl <- tl[valid]
 
   br <- try(bind_rows(tl) %>% unique(),silent = T)
 
   # if br is not err carry on
-  if(is.err(br)) return()
+  if(is.err(br) || !nrow(br)){
+    flog.error('Failed to aggregate files')
+    return()
+  }
 
-  fn <- filename('.bz2')
+  fn <- filename('.bz2','hour')
   readr::write_csv(br,fn)
   on.exit(file.remove(fn))
+
+  fi <- file.info(fn)
+
+  flog.info(paste('Created file of size',round(fi$size/1e3/1e3),'MB'))
+
   put <- sendToS3(fn,'ais-archive',10)
-  if(!is.err(put)) for(k in kl) aws.s3::delete_object(k,bucket = 'ais-current')
+
+  if(is.err(put)){
+    flog.error('Failed to upload to s3')
+  } else {
+    flog.info('Successfully uploaded to ais-archive, deleting from ais-current')
+    for(k in kl) delete_object(k,bucket = 'ais-current')
+  }
 
 }
