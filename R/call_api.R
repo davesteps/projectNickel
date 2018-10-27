@@ -58,13 +58,15 @@ sendToS3 <- function(obj,bucket,tryN = 5){
   put
 }
 
-startLogging <- function(projDir,name){
+startLogging <- function(projDir,name,log.threshold){
   # log_file <- 'example.log'
   # logger.options()
   require(futile.logger)
-  if(!dir.exists(file.path(projDir,'logs'))) dir.create('logs')
-  lf <- file.path(projDir,'logs',paste0(name,'-',filename('.log','day')))
+  ld <- file.path(projDir,'logs')
+  if(!dir.exists(ld)) dir.create(ld)
+  lf <- file.path(ld,paste0(name,'-',filename('.log','day')))
   flog.appender(appender.tee(lf))
+  flog.threshold(log.threshold)
 }
 
 setEnv <- function(keys){
@@ -82,27 +84,38 @@ setEnv <- function(keys){
 #' @export
 #'
 #' @examples
-aisToS3 <- function(projDir){
+aisToS3 <- function(projDir,log.threshold=4){
   require(projectNickel)
   require(aws.s3)
 
-  startLogging(projDir,'aisToS3')
-
+  startLogging(projDir,'aisToS3',log.threshold)
   flog.info('Starting AIShub API call')
-  keys <- readRDS(file.path(projDir,'keys.Rdata'))
 
+  keys <- readRDS(file.path(projDir,'keys.Rdata'))
   setEnv(keys)
 
   fn <- filename('.bz2','min')
-  download.file(keys$AISHUB_URL,destfile = fn)
-  # TODO try multiple times
   on.exit(file.remove(fn))
 
-  fs <- round(file.info(fn)$size/1e3/1e3,1)
-  if(fs<0.5){
-    flog.warn(paste('Created file of size',fs,'MB'))
+  f <- try(download.file(keys$AISHUB_URL,destfile = fn))
+  ct <- 1
+  while (is.err(f) & ct < 5){
+    flog.warn(paste('Failed to fetch file retry:',ct))
+    f <- try(download.file(keys$AISHUB_URL,destfile = fn))
+  }
+
+  if(is.err(f)){
+    flog.error('Failed to fetch file')
+    return()
+  }
+
+
+  fs <- round(file.info(fn)$size/1e6,1)
+  if(fs<0.2){
+    flog.error(paste0('File size is too small (',fs,'MB). Not Uploading to S3.'))
+    return()
   } else {
-    flog.info(paste('Created file of size',fs,'MB'))
+    flog.info(paste('Created',fs,'MB file.'))
   }
 
   put <- sendToS3(fn,'ais-current',5)
@@ -123,12 +136,12 @@ aisToS3 <- function(projDir){
 #' @export
 #'
 #' @examples
-aggregateAIS <- function(projDir){
+aggregateAIS <- function(projDir,log.threshold=4){
   require(projectNickel)
   require(dplyr)
   require(aws.s3)
 
-  startLogging(projDir,'aggregateAIS')
+  startLogging(projDir,'aggregateAIS',log.threshold)
 
   keys <- readRDS(file.path(projDir,'keys.Rdata'))
 
@@ -153,18 +166,14 @@ aggregateAIS <- function(projDir){
   kl <- kl$name
   flog.info(paste('Aggregating',length(kl), 'files'))
 
-  tl <- lapply(kl,function(k) try({
+  fetchFile <- function(k) try({
+      suppressMessages(s3read_using(readr::read_csv,object=k,bucket='ais-current'))
+    })
 
-    suppressMessages(s3read_using(readr::read_csv,object=k,bucket='ais-current'))
+  tl <- lapply(kl,fetchFile)
 
-    },silent = T))
+  is.valid <- function(t) if(is.err(t) || ncol(t)!=19 || !nrow(t)) F else T
 
-  is.valid <- function(t){
-    if(is.err(t) ) return(F)
-    if(ncol(t)!=19) return(F)
-    if(!nrow(t)) return(F)
-    T
-  }
   # filter out errors and (remove from kl)
   valid <- unlist(lapply(tl, is.valid))
   if(any(!valid)){
@@ -181,13 +190,13 @@ aggregateAIS <- function(projDir){
     return()
   }
 
-  fn <- filename('.bz2','hour')
+  fn <- filename('.bz2')
   readr::write_csv(br,fn)
   on.exit(file.remove(fn))
 
   fi <- file.info(fn)
 
-  flog.info(paste('Created file of size',round(fi$size/1e3/1e3),'MB'))
+  flog.info(paste('Created file of size',round(fi$size/1e6),'MB'))
 
   put <- sendToS3(fn,'ais-archive',10)
 
