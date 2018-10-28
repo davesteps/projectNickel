@@ -101,10 +101,11 @@ aisToS3 <- function(projDir='~/ais',log.threshold=4){
 
   f <- try(download.file(keys$AISHUB_URL,destfile = fn))
   ct <- 1
-  while (fileInvalid() & ct < 3){
+  while (fileInvalid() & ct < 5){
     Sys.sleep(2)
     flog.warn(paste('Failed to fetch file retry:',ct))
     f <- try(download.file(keys$AISHUB_URL,destfile = fn))
+    ct <- ct +1
   }
 
   if(is.err(f)){
