@@ -97,9 +97,12 @@ aisToS3 <- function(projDir,log.threshold=4){
   fn <- filename('.bz2','min')
   on.exit(file.remove(fn))
 
+  fileInvalid <- function() is.err(f) || ((file.info(fn)$size/1e6) < 0.2)
+
   f <- try(download.file(keys$AISHUB_URL,destfile = fn))
   ct <- 1
-  while (is.err(f) & ct < 5){
+  while (fileInvalid() & ct < 3){
+    Sys.sleep(2)
     flog.warn(paste('Failed to fetch file retry:',ct))
     f <- try(download.file(keys$AISHUB_URL,destfile = fn))
   }
@@ -108,7 +111,6 @@ aisToS3 <- function(projDir,log.threshold=4){
     flog.error('Failed to fetch file')
     return()
   }
-
 
   fs <- round(file.info(fn)$size/1e6,1)
   if(fs<0.2){
@@ -128,6 +130,8 @@ aisToS3 <- function(projDir,log.threshold=4){
 
 }
 
+
+
 #' aggregateAIS
 #'
 #' @param keys
@@ -136,12 +140,17 @@ aisToS3 <- function(projDir,log.threshold=4){
 #' @export
 #'
 #' @examples
-aggregateAIS <- function(projDir,log.threshold=4){
+aggregateAIS <- function(projDir='~/ais',log.threshold=4,cleanupMode=F){
   require(projectNickel)
   require(dplyr)
   require(aws.s3)
 
-  startLogging(projDir,'aggregateAIS',log.threshold)
+  if(cleanupMode){
+    startLogging(projDir,'aggregateAIS-cleanup',7)
+  } else {
+    startLogging(projDir,'aggregateAIS',log.threshold)
+  }
+
 
   keys <- readRDS(file.path(projDir,'keys.Rdata'))
 
@@ -154,12 +163,16 @@ aggregateAIS <- function(projDir,log.threshold=4){
     return()
   }
 
-  # only get keys from last 61mins
   cutoff <- lubridate::now(tzone = "UTC") - (61*60)
-  kl <- kl[kl$time > cutoff,]
+  if(!cleanupMode){
+    # only get keys from last 61mins
+    kl <- kl[kl$time > cutoff,]
+  } else {
+    kl <- kl[kl$time < cutoff,]
+  }
 
   if(!nrow(kl)){
-    flog.warn('No keys were found from the last hour ais-current')
+    flog.warn('No keys were found in ais-current')
     return()
   }
 
@@ -208,3 +221,5 @@ aggregateAIS <- function(projDir,log.threshold=4){
   }
 
 }
+
+
