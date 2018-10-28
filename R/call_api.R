@@ -84,7 +84,7 @@ setEnv <- function(keys){
 #' @export
 #'
 #' @examples
-aisToS3 <- function(projDir,log.threshold=4){
+aisToS3 <- function(projDir='~/ais',log.threshold=4){
   require(projectNickel)
   require(aws.s3)
 
