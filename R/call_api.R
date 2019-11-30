@@ -21,7 +21,7 @@ bucketKeys <- function(bucket,ext='bz2'){
   # given a bucket and extension
   # returns data frame with object keys and datetimes
   try({
-    bl <- aws.s3::get_bucket(bucket)
+    bl <- aws.s3::get_bucket(bucket,max = Inf)
     df <- plyr::ldply(bl,function(b){
       data.frame(name=b$Key,
                  time=(b$LastModified),
